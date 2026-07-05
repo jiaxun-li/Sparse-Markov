@@ -75,6 +75,12 @@ Regenerate only the JPG plots from an existing `summary.csv`:
 & 'D:\Anaconda\envs\d2l-zh\python.exe' '.\experiments\run_effective_support.py' --plot-only --out-dir='results/powerlaw_row_beta'
 ```
 
+Fixed-chain sweep over `n = 1, ..., 50000`, comparing all predictors with one fixed generated `M` and `pi`; the plot includes a smooth fitted theory curve `C * rate(n, K, s_n(mu))`:
+
+```powershell
+& 'D:\Anaconda\envs\d2l-zh\python.exe' '.\experiments\run_effective_support.py' --fixed-chain-n-sweep --reps=50 --seed=17 --fixed-k=100 --fixed-beta=2 --min-support=2 --max-support=40 --n-sweep-max=50000 --n-sweep-count=120 --out-dir='results/powerlaw_row_beta'
+```
+
 ## Outputs
 
 - `raw_losses.csv`: one row per trajectory, scenario, and predictor.
@@ -86,3 +92,6 @@ Regenerate only the JPG plots from an existing `summary.csv`:
 - `risk_vs_support_vary_beta_fixed_K_n.jpg`: fixed `K,n`, varying `beta`, with a smooth fitted theory curve as a function of `s_n(mu)`.
 - `risk_vs_support_vary_n_fixed_K_beta.jpg`: fixed `K,beta`, varying `n`.
 - `risk_vs_support_vary_K_fixed_n_beta.jpg`: fixed `n,beta`, varying `K`.
+- `fixed_chain_predictors_by_n.jpg`: fixed generated chain, varying `n`, comparing all predictors, with a smooth fitted theory curve.
+- `fixed_chain_risk_vs_theory_rate.jpg`: same fixed-chain sweep, with x-axis equal to the theory rate and y-axis equal to empirical next-row KL risk.
+- `fixed_chain_n_sweep_summary.csv`: summary table for the fixed-chain `n` sweep.

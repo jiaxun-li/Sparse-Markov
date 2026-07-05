@@ -52,6 +52,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fixed-beta", type=float, default=2.0)
     parser.add_argument("--k-grid", default="50,60,70,80,90,100,110,120,130,140,150,160,170,180,190,200,210,220,230,240")
     parser.add_argument("--n-grid", default="200,400,600,800,1000,1200,1400,1600,1800,2000,2200,2400,2600,2800,3000,3200,3400,3600,3800,4000")
+    parser.add_argument("--fixed-chain-n-sweep", action="store_true")
+    parser.add_argument("--n-sweep-max", type=int, default=50000)
+    parser.add_argument("--n-sweep-count", type=int, default=120)
     return parser.parse_args()
 
 
@@ -232,6 +235,27 @@ def parse_ints(raw: str) -> List[int]:
     return [int(value.strip()) for value in raw.split(",") if value.strip()]
 
 
+def log_spaced_ints(start: int, stop: int, count: int) -> List[int]:
+    if start < 1 or stop < start:
+        raise ValueError("need 1 <= start <= stop")
+    if count <= 1:
+        return [start, stop] if start != stop else [start]
+
+    values = {start, stop}
+    log_start = math.log(start)
+    log_stop = math.log(stop)
+    for idx in range(count):
+        value = round(math.exp(log_start + idx * (log_stop - log_start) / (count - 1)))
+        values.add(max(start, min(stop, int(value))))
+    values.update(range(start, min(stop, 20) + 1))
+    power = 1
+    while power <= stop:
+        if power >= start:
+            values.add(power)
+        power *= 10
+    return sorted(values)
+
+
 def scenario_grid(
     quick: bool,
     betas: Sequence[float],
@@ -339,6 +363,101 @@ def add_smooth_theory_curve(plt: object, rows: Sequence[Dict[str, object]], grid
     xs = [math.exp(log_min + idx * (log_max - log_min) / (grid_size - 1)) for idx in range(grid_size)]
     ys = [fitted_c * theory_rate(n, K, s) for s in xs]
     plt.plot(xs, ys, linestyle=":", linewidth=2.5, color="black", label=f"theory form, C={fitted_c:.2g}")
+
+
+def add_fixed_chain_n_theory_curve(
+    plt: object,
+    chain: Chain,
+    summary: Sequence[Dict[str, object]],
+    n_min: int,
+    n_max: int,
+    grid_size: int = 300,
+) -> None:
+    fitted_c = fitted_theory_constant(summary)
+    if fitted_c is None:
+        return
+    log_min = math.log(n_min)
+    log_max = math.log(n_max)
+    xs = [math.exp(log_min + idx * (log_max - log_min) / (grid_size - 1)) for idx in range(grid_size)]
+    ys = []
+    for n_value in xs:
+        s_value = effective_support(chain, n_value)
+        ys.append(fitted_c * theory_rate(n_value, chain.K, s_value))
+    plt.plot(xs, ys, linestyle=":", linewidth=2.5, color="black", label=f"theory form, C={fitted_c:.2g}")
+
+
+def predictor_colors(predictors: Sequence[str]) -> Dict[str, str]:
+    palette = ["#1b6ca8", "#edae49", "#f4a261", "#d1495b", "#7a5195", "#4d908e"]
+    return {predictor: color for predictor, color in zip(predictors, palette)}
+
+
+def write_fixed_chain_plots(summary: Sequence[Dict[str, object]], chain: Chain, n_values: Sequence[int], out_dir: str) -> List[str]:
+    import matplotlib.pyplot as plt
+
+    colors = predictor_colors(PREDICTORS)
+    plot_paths = []
+
+    plt.figure(figsize=(10, 6))
+    for predictor in PREDICTORS:
+        rows = sorted([row for row in summary if row["predictor"] == predictor], key=lambda row: int(row["n"]))
+        plt.plot(
+            [int(row["n"]) for row in rows],
+            [max(float(row["mean_loss"]), 1e-12) for row in rows],
+            marker="o",
+            markersize=3,
+            linewidth=1.6,
+            label=predictor,
+            color=colors[predictor],
+        )
+    add_fixed_chain_n_theory_curve(plt, chain, summary, min(n_values), max(n_values))
+    plt.xscale("log")
+    plt.yscale("log")
+    plt.xlabel("sample length n")
+    plt.ylabel("empirical next-row KL risk")
+    plt.title(f"Predictor comparison with fixed chain (K={chain.K}, beta={chain.beta:g})")
+    plt.legend()
+    plt.tight_layout()
+    plot_path = os.path.join(out_dir, "fixed_chain_predictors_by_n.jpg")
+    plt.savefig(plot_path, dpi=180)
+    plt.close()
+    plot_paths.append(plot_path)
+
+    plt.figure(figsize=(10, 6))
+    for predictor in PREDICTORS:
+        rows = sorted([row for row in summary if row["predictor"] == predictor], key=lambda row: float(row["rate"]))
+        plt.plot(
+            [float(row["rate"]) for row in rows],
+            [max(float(row["mean_loss"]), 1e-12) for row in rows],
+            marker="o",
+            markersize=3,
+            linewidth=1.6,
+            label=predictor,
+            color=colors[predictor],
+        )
+    fitted_c = fitted_theory_constant(summary)
+    if fitted_c is not None:
+        rates = [float(row["rate"]) for row in summary if float(row["rate"]) > 0]
+        if rates:
+            x_min = min(rates)
+            x_max = max(rates)
+            log_min = math.log(x_min)
+            log_max = math.log(x_max)
+            xs = [math.exp(log_min + idx * (log_max - log_min) / 299) for idx in range(300)]
+            ys = [fitted_c * x for x in xs]
+            plt.plot(xs, ys, linestyle=":", linewidth=2.5, color="black", label=f"theory form, C={fitted_c:.2g}")
+    plt.xscale("log")
+    plt.yscale("log")
+    plt.xlabel("theory rate")
+    plt.ylabel("empirical next-row KL risk")
+    plt.title(f"Empirical risk vs theory rate with fixed chain (K={chain.K}, beta={chain.beta:g})")
+    plt.legend()
+    plt.tight_layout()
+    plot_path = os.path.join(out_dir, "fixed_chain_risk_vs_theory_rate.jpg")
+    plt.savefig(plot_path, dpi=180)
+    plt.close()
+    plot_paths.append(plot_path)
+
+    return plot_paths
 
 
 def plot_risk_vs_support_slice(
@@ -503,6 +622,78 @@ def write_plots(summary: Sequence[Dict[str, object]], out_dir: str) -> None:
         )
 
 
+def write_fixed_chain_n_sweep(args: argparse.Namespace) -> None:
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        raise RuntimeError("matplotlib is required because this script is configured to write JPG plots only")
+
+    chain = make_powerlaw_row_chain(args.fixed_k, args.min_support, args.max_support, args.fixed_beta)
+    n_values = log_spaced_ints(1, args.n_sweep_max, args.n_sweep_count)
+    raw_rows = []
+    s_by_n = {n: effective_support(chain, n) for n in n_values}
+    rate_by_n = {n: theory_rate(n, chain.K, s_by_n[n]) for n in n_values}
+
+    for rep in range(1, args.reps + 1):
+        path = simulate_path(chain, args.n_sweep_max)
+        for n in n_values:
+            losses = predict_losses(path[:n], chain)
+            for predictor in PREDICTORS:
+                raw_rows.append(
+                    {
+                        "K": chain.K,
+                        "n": n,
+                        "min_support": chain.min_support,
+                        "max_support": chain.max_support,
+                        "beta": chain.beta,
+                        "avg_row_support": chain.avg_row_support,
+                        "s_eff": s_by_n[n],
+                        "rate": rate_by_n[n],
+                        "rep": rep,
+                        "predictor": predictor,
+                        "loss": losses[predictor],
+                    }
+                )
+        if rep % max(1, args.reps // 10) == 0:
+            print(f"completed {rep}/{args.reps} fixed-chain n-sweep trajectories")
+
+    summary = summarise_rows(raw_rows)
+    raw_path = os.path.join(args.out_dir, "fixed_chain_n_sweep_raw_losses.csv")
+    summary_path = os.path.join(args.out_dir, "fixed_chain_n_sweep_summary.csv")
+    write_csv(
+        raw_path,
+        raw_rows,
+        ["K", "n", "min_support", "max_support", "beta", "avg_row_support", "s_eff", "rate", "rep", "predictor", "loss"],
+    )
+    write_csv(
+        summary_path,
+        summary,
+        [
+            "K",
+            "n",
+            "min_support",
+            "max_support",
+            "beta",
+            "avg_row_support",
+            "s_eff",
+            "rate",
+            "predictor",
+            "mean_loss",
+            "se_loss",
+            "median_loss",
+            "mean_ratio_to_rate",
+            "reps",
+        ],
+    )
+
+    plot_paths = write_fixed_chain_plots(summary, chain, n_values, args.out_dir)
+
+    print(f"wrote {os.path.abspath(raw_path)}")
+    print(f"wrote {os.path.abspath(summary_path)}")
+    for plot_path in plot_paths:
+        print(f"wrote {os.path.abspath(plot_path)}")
+
+
 def print_predictor_summary(summary: Sequence[Dict[str, object]]) -> None:
     by_predictor = defaultdict(list)
     for row in summary:
@@ -523,6 +714,10 @@ def main() -> None:
 
     raw_path = os.path.join(args.out_dir, "raw_losses.csv")
     summary_path = os.path.join(args.out_dir, "summary.csv")
+
+    if args.fixed_chain_n_sweep:
+        write_fixed_chain_n_sweep(args)
+        return
 
     if args.plot_only:
         summary = read_csv(summary_path)
