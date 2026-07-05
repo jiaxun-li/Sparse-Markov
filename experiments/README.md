@@ -47,15 +47,21 @@ and compares it with the effective-support rate
 - `add-half`: full-alphabet add-half smoothing.
 - `adaptive`: row-wise adaptive smoothing from the note.
 - `cesaro`: Cesaro average of adaptive suffix predictors.
-- `oracle`: add-half smoothing restricted to the true active successors.
+- `support-oracle`: add-half smoothing restricted to the true active successors.
 
 ## Run
 
 On this machine, `D:\Anaconda\envs\d2l-zh\python.exe` has a working matplotlib install and writes JPG plots:
 
 ```powershell
-& 'D:\Anaconda\envs\d2l-zh\python.exe' '.\experiments\run_effective_support.py' --reps=100 --seed=11 --min-support=2 --max-support=40 --betas=0,0.5,1,1.5,2 --out-dir='results/powerlaw_row'
+& 'D:\Anaconda\envs\d2l-zh\python.exe' '.\experiments\run_effective_support.py' --reps=100 --seed=11 --min-support=2 --max-support=40 --betas=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20 --out-dir='results/powerlaw_row_beta'
 ```
+
+The default full run uses a targeted slice grid:
+
+- fixed `K = 100`, `n = 1000`, varying `beta`;
+- fixed `K = 100`, `beta = 2`, varying 20 values of `n`;
+- fixed `n = 1000`, `beta = 2`, varying 20 values of `K`.
 
 Quick smoke test:
 
@@ -66,13 +72,17 @@ Quick smoke test:
 Regenerate only the JPG plots from an existing `summary.csv`:
 
 ```powershell
-& 'D:\Anaconda\envs\d2l-zh\python.exe' '.\experiments\run_effective_support.py' --plot-only --out-dir='results/powerlaw_row'
+& 'D:\Anaconda\envs\d2l-zh\python.exe' '.\experiments\run_effective_support.py' --plot-only --out-dir='results/powerlaw_row_beta'
 ```
 
 ## Outputs
 
 - `raw_losses.csv`: one row per trajectory, scenario, and predictor.
 - `summary.csv`: mean/median KL risk, standard error, and risk/rate ratio.
-- `risk_vs_theory_rate.jpg`: empirical risk against the effective-support rate.
+- `risk_vs_effective_support.jpg`: empirical risk against the effective support size `s_n(mu)`.
 - `predictor_comparison.jpg`: median across-scenario risk by predictor.
+- `effective_support_by_beta.jpg`: median effective support size as `beta` varies.
 - `predictor_comparison_by_beta.jpg`: median empirical KL risk for each predictor as `beta` varies.
+- `risk_vs_support_vary_beta_fixed_K_n.jpg`: fixed `K,n`, varying `beta`, with a smooth fitted theory curve as a function of `s_n(mu)`.
+- `risk_vs_support_vary_n_fixed_K_beta.jpg`: fixed `K,beta`, varying `n`.
+- `risk_vs_support_vary_K_fixed_n_beta.jpg`: fixed `n,beta`, varying `K`.

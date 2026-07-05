@@ -15,10 +15,10 @@ import random
 from collections import defaultdict
 from dataclasses import dataclass
 from statistics import median
-from typing import Dict, List, Sequence
+from typing import Dict, List, Optional, Sequence
 
 
-PREDICTORS = ["MLE", "add-one", "add-half", "adaptive", "cesaro", "oracle"]
+PREDICTORS = ["MLE", "add-one", "add-half", "adaptive", "cesaro", "support-oracle"]
 
 
 @dataclass
@@ -46,7 +46,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--plot-only", action="store_true")
     parser.add_argument("--min-support", type=int, default=2)
     parser.add_argument("--max-support", type=int, default=40)
-    parser.add_argument("--betas", default="0,0.5,1,1.5,2")
+    parser.add_argument("--betas", default="0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20")
+    parser.add_argument("--fixed-k", type=int, default=100)
+    parser.add_argument("--fixed-n", type=int, default=1000)
+    parser.add_argument("--fixed-beta", type=float, default=2.0)
+    parser.add_argument("--k-grid", default="50,60,70,80,90,100,110,120,130,140,150,160,170,180,190,200,210,220,230,240")
+    parser.add_argument("--n-grid", default="200,400,600,800,1000,1200,1400,1600,1800,2000,2200,2400,2600,2800,3000,3200,3400,3600,3800,4000")
     return parser.parse_args()
 
 
@@ -167,11 +172,11 @@ def predict_losses(x: Sequence[int], chain: Chain, eps: float = 1e-12) -> Dict[s
     losses["adaptive"] = kl_true(q_adaptive, true_support, true_probs)
 
     support_total = sum(counts[j] for j in true_support)
-    q_oracle = [0.0] * K
+    q_support_oracle = [0.0] * K
     denom = support_total + 0.5 * len(true_support)
     for j in true_support:
-        q_oracle[j] = (counts[j] + 0.5) / denom
-    losses["oracle"] = kl_true(q_oracle, true_support, true_probs)
+        q_support_oracle[j] = (counts[j] + 0.5) / denom
+    losses["support-oracle"] = kl_true(q_support_oracle, true_support, true_probs)
 
     losses["cesaro"] = cesaro_loss(x, chain, true_support, true_probs)
     return losses
@@ -223,20 +228,35 @@ def parse_betas(raw: str) -> List[float]:
     return [float(value.strip()) for value in raw.split(",") if value.strip()]
 
 
-def scenario_grid(quick: bool, betas: Sequence[float]) -> List[Dict[str, object]]:
+def parse_ints(raw: str) -> List[int]:
+    return [int(value.strip()) for value in raw.split(",") if value.strip()]
+
+
+def scenario_grid(
+    quick: bool,
+    betas: Sequence[float],
+    fixed_k: int,
+    fixed_n: int,
+    fixed_beta: float,
+    k_grid: Sequence[int],
+    n_grid: Sequence[int],
+) -> List[Dict[str, object]]:
     if quick:
-        return [
-            {"K": K, "n": n, "beta": beta}
-            for K in [80]
-            for n in [400, 800]
-            for beta in betas
-        ]
-    return [
-        {"K": K, "n": n, "beta": beta}
-        for K in [100, 200]
-        for n in [500, 1000, 2000]
-        for beta in betas
-    ]
+        k_grid = [80, 100, 120]
+        n_grid = [400, 800, 1200]
+        fixed_k = 100
+        fixed_n = 800
+        fixed_beta = betas[min(len(betas) - 1, 1)]
+
+    scenarios = []
+    scenarios.extend({"K": fixed_k, "n": fixed_n, "beta": beta} for beta in betas)
+    scenarios.extend({"K": fixed_k, "n": n, "beta": fixed_beta} for n in n_grid)
+    scenarios.extend({"K": k, "n": fixed_n, "beta": fixed_beta} for k in k_grid)
+
+    unique = {}
+    for scenario in scenarios:
+        unique[(int(scenario["K"]), int(scenario["n"]), float(scenario["beta"]))] = scenario
+    return list(unique.values())
 
 
 def summarise_rows(rows: Sequence[Dict[str, object]]) -> List[Dict[str, object]]:
@@ -279,6 +299,92 @@ def read_csv(path: str) -> List[Dict[str, object]]:
         return list(csv.DictReader(handle))
 
 
+def choose_value(values: Sequence[float], preferred: float) -> float:
+    return min(values, key=lambda value: abs(value - preferred))
+
+
+def fitted_theory_constant(rows: Sequence[Dict[str, object]]) -> Optional[float]:
+    cesaro_rows = [
+        row
+        for row in rows
+        if row["predictor"] == "cesaro" and float(row["mean_loss"]) > 0 and float(row["rate"]) > 0
+    ]
+    if not cesaro_rows:
+        return None
+    log_c = sum(math.log(float(row["mean_loss"]) / float(row["rate"])) for row in cesaro_rows) / len(cesaro_rows)
+    return math.exp(log_c)
+
+
+def add_smooth_theory_curve(plt: object, rows: Sequence[Dict[str, object]], grid_size: int = 200) -> None:
+    fitted_c = fitted_theory_constant(rows)
+    if fitted_c is None:
+        return
+    k_values = {float(row["K"]) for row in rows}
+    n_values = {float(row["n"]) for row in rows}
+    if len(k_values) != 1 or len(n_values) != 1:
+        return
+
+    K = int(next(iter(k_values)))
+    n = int(next(iter(n_values)))
+    s_values = [float(row["s_eff"]) for row in rows if float(row["s_eff"]) > 0]
+    if len(s_values) < 2:
+        return
+    s_min = min(s_values)
+    s_max = max(s_values)
+    if s_min >= s_max:
+        return
+
+    log_min = math.log(s_min)
+    log_max = math.log(s_max)
+    xs = [math.exp(log_min + idx * (log_max - log_min) / (grid_size - 1)) for idx in range(grid_size)]
+    ys = [fitted_c * theory_rate(n, K, s) for s in xs]
+    plt.plot(xs, ys, linestyle=":", linewidth=2.5, color="black", label=f"theory form, C={fitted_c:.2g}")
+
+
+def plot_risk_vs_support_slice(
+    plt: object,
+    summary: Sequence[Dict[str, object]],
+    predictors: Sequence[str],
+    colors: Dict[str, str],
+    fixed: Dict[str, float],
+    varying: str,
+    title: str,
+    path: str,
+    draw_smooth_theory: bool = False,
+) -> None:
+    rows = [
+        row
+        for row in summary
+        if all(abs(float(row[key]) - value) < 1e-12 for key, value in fixed.items())
+    ]
+    if not rows:
+        return
+
+    plt.figure(figsize=(9, 6))
+    for predictor in predictors:
+        predictor_rows = sorted(
+            [row for row in rows if row["predictor"] == predictor],
+            key=lambda row: float(row["s_eff"]),
+        )
+        if not predictor_rows:
+            continue
+        xs = [float(row["s_eff"]) for row in predictor_rows]
+        ys = [max(float(row["mean_loss"]), 1e-12) for row in predictor_rows]
+        plt.scatter(xs, ys, s=36, label=predictor, color=colors[predictor])
+
+    if draw_smooth_theory:
+        add_smooth_theory_curve(plt, rows)
+    plt.xscale("log")
+    plt.yscale("log")
+    plt.xlabel("effective support size s_n(mu)")
+    plt.ylabel("empirical next-row KL risk")
+    plt.title(title)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(path, dpi=180)
+    plt.close()
+
+
 def write_plots(summary: Sequence[Dict[str, object]], out_dir: str) -> None:
     try:
         import matplotlib.pyplot as plt
@@ -295,23 +401,19 @@ def write_plots(summary: Sequence[Dict[str, object]], out_dir: str) -> None:
     for predictor in predictors:
         rows = [row for row in summary if row["predictor"] == predictor]
         plt.scatter(
-            [float(row["rate"]) for row in rows],
+            [float(row["s_eff"]) for row in rows],
             [max(float(row["mean_loss"]), 1e-12) for row in rows],
             label=predictor,
             color=colors[predictor],
         )
     plt.xscale("log")
     plt.yscale("log")
-    line_min = max(min(float(row["rate"]) for row in summary), min(max(float(row["mean_loss"]), 1e-12) for row in summary))
-    line_max = min(max(float(row["rate"]) for row in summary), max(max(float(row["mean_loss"]), 1e-12) for row in summary))
-    if line_min < line_max:
-        plt.plot([line_min, line_max], [line_min, line_max], linestyle="--", color="0.4", linewidth=1.2)
-    plt.xlabel("effective-support theory rate")
+    plt.xlabel("effective support size s_n(mu)")
     plt.ylabel("empirical next-row KL risk")
-    plt.title("Empirical risk vs effective-support rate")
+    plt.title("Empirical risk vs effective support size")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "risk_vs_theory_rate.jpg"), dpi=180)
+    plt.savefig(os.path.join(out_dir, "risk_vs_effective_support.jpg"), dpi=180)
     plt.close()
 
     medians = []
@@ -328,25 +430,77 @@ def write_plots(summary: Sequence[Dict[str, object]], out_dir: str) -> None:
     plt.savefig(os.path.join(out_dir, "predictor_comparison.jpg"), dpi=180)
     plt.close()
 
-    betas = sorted({float(row["beta"]) for row in summary})
-    plt.figure(figsize=(10, 6))
-    for predictor in predictors:
-        values = []
+    if summary and "beta" in summary[0]:
+        betas = sorted({float(row["beta"]) for row in summary})
+        s_values = []
         for beta in betas:
-            beta_rows = [
-                float(row["mean_loss"])
-                for row in summary
-                if row["predictor"] == predictor and abs(float(row["beta"]) - beta) < 1e-12
-            ]
-            values.append(median(beta_rows))
-        plt.plot(betas, values, marker="o", linewidth=2, label=predictor, color=colors[predictor])
-    plt.xlabel("power-law exponent beta")
-    plt.ylabel("median empirical KL risk")
-    plt.title("Predictor comparison across beta")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(os.path.join(out_dir, "predictor_comparison_by_beta.jpg"), dpi=180)
-    plt.close()
+            beta_s = [float(row["s_eff"]) for row in summary if abs(float(row["beta"]) - beta) < 1e-12]
+            s_values.append(median(beta_s))
+        plt.figure(figsize=(9, 6))
+        plt.plot(betas, s_values, marker="o", linewidth=2, color="#1b6ca8")
+        plt.xlabel("power-law exponent beta")
+        plt.ylabel("median effective support size s_n(mu)")
+        plt.title("Effective support size across beta")
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, "effective_support_by_beta.jpg"), dpi=180)
+        plt.close()
+
+        plt.figure(figsize=(10, 6))
+        for predictor in predictors:
+            values = []
+            for beta in betas:
+                beta_rows = [
+                    float(row["mean_loss"])
+                    for row in summary
+                    if row["predictor"] == predictor and abs(float(row["beta"]) - beta) < 1e-12
+                ]
+                values.append(median(beta_rows))
+            plt.plot(betas, values, marker="o", linewidth=2, label=predictor, color=colors[predictor])
+        plt.xlabel("power-law exponent beta")
+        plt.ylabel("median empirical KL risk")
+        plt.title("Predictor comparison across beta")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, "predictor_comparison_by_beta.jpg"), dpi=180)
+        plt.close()
+
+        ks = sorted({float(row["K"]) for row in summary})
+        ns = sorted({float(row["n"]) for row in summary})
+        fixed_k = choose_value(ks, 100)
+        fixed_n = choose_value(ns, 1000)
+        fixed_beta = choose_value(betas, 2)
+
+        plot_risk_vs_support_slice(
+            plt,
+            summary,
+            predictors,
+            colors,
+            fixed={"K": fixed_k, "n": fixed_n},
+            varying="beta",
+            title=f"Risk vs effective support, varying beta (K={fixed_k:g}, n={fixed_n:g})",
+            path=os.path.join(out_dir, "risk_vs_support_vary_beta_fixed_K_n.jpg"),
+            draw_smooth_theory=True,
+        )
+        plot_risk_vs_support_slice(
+            plt,
+            summary,
+            predictors,
+            colors,
+            fixed={"K": fixed_k, "beta": fixed_beta},
+            varying="n",
+            title=f"Risk vs effective support, varying n (K={fixed_k:g}, beta={fixed_beta:g})",
+            path=os.path.join(out_dir, "risk_vs_support_vary_n_fixed_K_beta.jpg"),
+        )
+        plot_risk_vs_support_slice(
+            plt,
+            summary,
+            predictors,
+            colors,
+            fixed={"n": fixed_n, "beta": fixed_beta},
+            varying="K",
+            title=f"Risk vs effective support, varying K (n={fixed_n:g}, beta={fixed_beta:g})",
+            path=os.path.join(out_dir, "risk_vs_support_vary_K_fixed_n_beta.jpg"),
+        )
 
 
 def print_predictor_summary(summary: Sequence[Dict[str, object]]) -> None:
@@ -362,6 +516,8 @@ def main() -> None:
     if args.quick:
         args.reps = min(args.reps, 20)
     betas = parse_betas(args.betas)
+    k_grid = parse_ints(args.k_grid)
+    n_grid = parse_ints(args.n_grid)
     random.seed(args.seed)
     os.makedirs(args.out_dir, exist_ok=True)
 
@@ -374,7 +530,7 @@ def main() -> None:
         print(f"rewrote plots in {os.path.abspath(args.out_dir)}")
         return
 
-    grid = scenario_grid(args.quick, betas)
+    grid = scenario_grid(args.quick, betas, args.fixed_k, args.fixed_n, args.fixed_beta, k_grid, n_grid)
     total = len(grid) * args.reps
     done = 0
     rows = []
