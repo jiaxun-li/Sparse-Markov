@@ -81,6 +81,12 @@ Fixed-chain sweep over `n = 1, ..., 50000`, comparing all predictors with one fi
 & 'D:\Anaconda\envs\d2l-zh\python.exe' '.\experiments\run_effective_support.py' --fixed-chain-n-sweep --reps=50 --seed=17 --fixed-k=100 --fixed-beta=2 --min-support=2 --max-support=40 --n-sweep-max=50000 --n-sweep-count=120 --out-dir='results/powerlaw_row_beta'
 ```
 
+Grid sweep over 10 values of `K` from 100 to 1000, 10 values of `beta` from 1 to 10, and 1000 values of `n` from 10 to 10000; the plot uses the theory rate as the x-axis and does not draw a fitted reference line. This large grid omits exact `cesaro` because computing the suffix average at all 100000 grid points is much slower than the other predictors:
+
+```powershell
+& 'D:\Anaconda\envs\d2l-zh\python.exe' '.\experiments\run_effective_support.py' --grid-rate-plot --reps=1 --seed=23 --min-support=2 --max-support=40 --grid-k-count=10 --grid-beta-count=10 --grid-n-count=1000 --grid-stationary-steps=300 --out-dir='results/powerlaw_row_beta'
+```
+
 ## Outputs
 
 - `raw_losses.csv`: one row per trajectory, scenario, and predictor.
@@ -95,3 +101,5 @@ Fixed-chain sweep over `n = 1, ..., 50000`, comparing all predictors with one fi
 - `fixed_chain_predictors_by_n.jpg`: fixed generated chain, varying `n`, comparing all predictors, with a smooth fitted theory curve.
 - `fixed_chain_risk_vs_theory_rate.jpg`: same fixed-chain sweep, with x-axis equal to the theory rate and y-axis equal to empirical next-row KL risk.
 - `fixed_chain_n_sweep_summary.csv`: summary table for the fixed-chain `n` sweep.
+- `grid_risk_vs_theory_rate.jpg`: grid sweep across `K`, `beta`, and `n`, with empirical risk plotted against the theory rate.
+- `grid_rate_summary.csv`: summary table for the grid sweep.

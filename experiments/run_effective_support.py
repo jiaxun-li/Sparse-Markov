@@ -8,6 +8,7 @@ and matplotlib for JPG plots.
 from __future__ import annotations
 
 import argparse
+import bisect
 import csv
 import math
 import os
@@ -19,6 +20,7 @@ from typing import Dict, List, Optional, Sequence
 
 
 PREDICTORS = ["MLE", "add-one", "add-half", "adaptive", "cesaro", "support-oracle"]
+GRID_PREDICTORS = ["MLE", "add-one", "add-half", "adaptive", "support-oracle"]
 
 
 @dataclass
@@ -55,6 +57,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fixed-chain-n-sweep", action="store_true")
     parser.add_argument("--n-sweep-max", type=int, default=50000)
     parser.add_argument("--n-sweep-count", type=int, default=120)
+    parser.add_argument("--grid-rate-plot", action="store_true")
+    parser.add_argument("--grid-k-count", type=int, default=10)
+    parser.add_argument("--grid-beta-count", type=int, default=10)
+    parser.add_argument("--grid-n-count", type=int, default=1000)
+    parser.add_argument("--grid-stationary-steps", type=int, default=300)
     return parser.parse_args()
 
 
@@ -93,7 +100,7 @@ def power_law_probs(size: int, beta: float) -> List[float]:
     return [weight / total for weight in weights]
 
 
-def make_powerlaw_row_chain(K: int, min_support: int, max_support: int, beta: float) -> Chain:
+def make_powerlaw_row_chain(K: int, min_support: int, max_support: int, beta: float, stationary_steps: int = 5000) -> Chain:
     if min_support < 1:
         raise ValueError("min_support must be >= 1")
     if max_support > K:
@@ -109,7 +116,7 @@ def make_powerlaw_row_chain(K: int, min_support: int, max_support: int, beta: fl
         random.shuffle(support)
         nexts.append(support)
         probs.append(power_law_probs(size, beta))
-    pi = draw_stationary_distribution(nexts, probs, K)
+    pi = draw_stationary_distribution(nexts, probs, K, steps=stationary_steps)
     return Chain(
         K=K,
         min_support=min_support,
@@ -215,6 +222,116 @@ def cesaro_loss(x: Sequence[int], chain: Chain, true_support: Sequence[int], tru
     return sum(p * math.log(p / max(q_value, tiny)) for p, q_value in zip(true_probs, q))
 
 
+def index_row_events(path: Sequence[int], K: int) -> List[List[tuple]]:
+    events = [[] for _ in range(K)]
+    for t in range(len(path) - 1):
+        events[path[t]].append((t, path[t + 1]))
+    return events
+
+
+def row_event_counts(events: Sequence[tuple], cutoff_time: int) -> tuple:
+    times = [event[0] for event in events]
+    cutoff = bisect.bisect_left(times, cutoff_time)
+    counts = defaultdict(int)
+    for _, nxt in events[:cutoff]:
+        counts[nxt] += 1
+    return counts, cutoff
+
+
+def cesaro_loss_from_events(
+    events: Sequence[tuple],
+    n: int,
+    K: int,
+    true_support: Sequence[int],
+    true_probs: Sequence[float],
+) -> float:
+    relevant = [event for event in events if event[0] < n - 1]
+    counts = defaultdict(int)
+    distinct = 0
+    row_n = 0
+    q_sum = [0.0] * len(true_support)
+    previous_start = n
+
+    for t, nxt in reversed(relevant):
+        segment_length = previous_start - (t + 1)
+        if segment_length > 0:
+            if row_n == 0:
+                for idx in range(len(q_sum)):
+                    q_sum[idx] += segment_length / K
+            else:
+                denom = row_n + distinct
+                for idx, j in enumerate(true_support):
+                    q_sum[idx] += segment_length * ((counts[j] + distinct / K) / denom)
+
+        if counts[nxt] == 0:
+            distinct += 1
+        counts[nxt] += 1
+        row_n += 1
+
+        denom = row_n + distinct
+        for idx, j in enumerate(true_support):
+            q_sum[idx] += (counts[j] + distinct / K) / denom
+        previous_start = t
+
+    if previous_start > 0:
+        segment_length = previous_start
+        if row_n == 0:
+            for idx in range(len(q_sum)):
+                q_sum[idx] += segment_length / K
+        else:
+            denom = row_n + distinct
+            for idx, j in enumerate(true_support):
+                q_sum[idx] += segment_length * ((counts[j] + distinct / K) / denom)
+
+    q = [value / n for value in q_sum]
+    tiny = float.fromhex("0x1.0p-1022")
+    return sum(p * math.log(p / max(q_value, tiny)) for p, q_value in zip(true_probs, q))
+
+
+def predict_losses_from_events(
+    n: int,
+    path: Sequence[int],
+    chain: Chain,
+    row_events: Sequence[Sequence[tuple]],
+    eps: float = 1e-12,
+    include_cesaro: bool = True,
+) -> Dict[str, float]:
+    K = chain.K
+    terminal = path[n - 1]
+    true_support = chain.nexts[terminal]
+    true_probs = chain.probs[terminal]
+    counts, row_n = row_event_counts(row_events[terminal], n - 1)
+    distinct = len(counts)
+
+    if row_n == 0:
+        q_mle_support = {j: 1.0 / K for j in true_support}
+    else:
+        q_mle = {j: max(counts[j] / row_n, eps) for j in true_support}
+        clipped_unseen = K - len(counts)
+        total = sum(max(count / row_n, eps) for count in counts.values()) + clipped_unseen * eps
+        q_mle_support = {j: q_mle[j] / total for j in true_support}
+    losses = {"MLE": sum(p * math.log(p / max(q_mle_support[j], float.fromhex("0x1.0p-1022"))) for j, p in zip(true_support, true_probs))}
+
+    for name, alpha in [("add-one", 1.0), ("add-half", 0.5)]:
+        denom = row_n + K * alpha
+        q = [(counts[j] + alpha) / denom for j in true_support]
+        losses[name] = sum(p * math.log(p / q_value) for p, q_value in zip(true_probs, q))
+
+    if row_n == 0:
+        q_adaptive = [1.0 / K] * len(true_support)
+    else:
+        q_adaptive = [(counts[j] + distinct / K) / (row_n + distinct) for j in true_support]
+    losses["adaptive"] = sum(p * math.log(p / max(q_value, float.fromhex("0x1.0p-1022"))) for p, q_value in zip(true_probs, q_adaptive))
+
+    support_total = sum(counts[j] for j in true_support)
+    denom = support_total + 0.5 * len(true_support)
+    q_support_oracle = [(counts[j] + 0.5) / denom for j in true_support]
+    losses["support-oracle"] = sum(p * math.log(p / q_value) for p, q_value in zip(true_probs, q_support_oracle))
+    if include_cesaro:
+        losses["cesaro"] = cesaro_loss_from_events(row_events[terminal], n, K, true_support, true_probs)
+    return losses
+
+
 def effective_support(chain: Chain, n: int) -> float:
     total = 0.0
     for i, support in enumerate(chain.nexts):
@@ -254,6 +371,15 @@ def log_spaced_ints(start: int, stop: int, count: int) -> List[int]:
             values.add(power)
         power *= 10
     return sorted(values)
+
+
+def linearly_spaced_ints(start: int, stop: int, count: int) -> List[int]:
+    if start < 1 or stop < start:
+        raise ValueError("need 1 <= start <= stop")
+    if count <= 1:
+        return [start]
+    values = [round(start + idx * (stop - start) / (count - 1)) for idx in range(count)]
+    return sorted(set(int(value) for value in values))
 
 
 def scenario_grid(
@@ -387,7 +513,7 @@ def add_fixed_chain_n_theory_curve(
 
 
 def predictor_colors(predictors: Sequence[str]) -> Dict[str, str]:
-    palette = ["#1b6ca8", "#edae49", "#f4a261", "#d1495b", "#7a5195", "#4d908e"]
+    palette = ["#0072B2", "#E69F00", "#CC79A7", "#D55E00", "#009E73", "#56B4E9"]
     return {predictor: color for predictor, color in zip(predictors, palette)}
 
 
@@ -458,6 +584,124 @@ def write_fixed_chain_plots(summary: Sequence[Dict[str, object]], chain: Chain, 
     plot_paths.append(plot_path)
 
     return plot_paths
+
+
+def write_grid_rate_plot(summary: Sequence[Dict[str, object]], out_dir: str) -> str:
+    import matplotlib.pyplot as plt
+
+    predictors = list(dict.fromkeys(row["predictor"] for row in summary))
+    colors = predictor_colors(predictors)
+    markers = ["o", "s", "^", "D", "P", "X"]
+
+    plt.figure(figsize=(11, 6.5))
+    for predictor in predictors:
+        rows = [row for row in summary if row["predictor"] == predictor]
+        marker = markers[predictors.index(predictor) % len(markers)]
+        plt.scatter(
+            [float(row["rate"]) for row in rows],
+            [max(float(row["mean_loss"]), 1e-12) for row in rows],
+            s=8,
+            alpha=0.7,
+            label=predictor,
+            color=colors[predictor],
+            marker=marker,
+            edgecolors="none",
+        )
+    plt.xscale("log")
+    plt.yscale("log")
+    plt.xlabel("theory rate")
+    plt.ylabel("empirical next-row KL risk")
+    plt.title("Empirical risk vs theory rate across K, beta, and n")
+    plt.grid(True, which="both", linestyle=":", linewidth=0.6, alpha=0.45)
+    plt.legend(loc="center left", bbox_to_anchor=(1.02, 0.5), borderaxespad=0, markerscale=2.5)
+    plt.tight_layout()
+    path = os.path.join(out_dir, "grid_risk_vs_theory_rate.jpg")
+    plt.savefig(path, dpi=180)
+    plt.close()
+    return path
+
+
+def write_grid_rate_experiment(args: argparse.Namespace) -> None:
+    try:
+        import matplotlib.pyplot as plt  # noqa: F401
+    except ImportError:
+        raise RuntimeError("matplotlib is required because this script is configured to write JPG plots only")
+
+    k_values = linearly_spaced_ints(100, 1000, args.grid_k_count)
+    beta_values = linearly_spaced_ints(1, 10, args.grid_beta_count)
+    n_values = linearly_spaced_ints(10, 10000, args.grid_n_count)
+    raw_rows = []
+    total = len(k_values) * len(beta_values) * args.reps
+    done = 0
+
+    for K in k_values:
+        for beta in beta_values:
+            chain = make_powerlaw_row_chain(
+                K,
+                args.min_support,
+                min(args.max_support, K),
+                float(beta),
+                stationary_steps=args.grid_stationary_steps,
+            )
+            s_by_n = {n: effective_support(chain, n) for n in n_values}
+            rate_by_n = {n: theory_rate(n, K, s_by_n[n]) for n in n_values}
+            for rep in range(1, args.reps + 1):
+                path = simulate_path(chain, max(n_values))
+                row_events = index_row_events(path, K)
+                for n in n_values:
+                    losses = predict_losses_from_events(n, path, chain, row_events, include_cesaro=False)
+                    for predictor in GRID_PREDICTORS:
+                        raw_rows.append(
+                            {
+                                "K": K,
+                                "n": n,
+                                "min_support": args.min_support,
+                                "max_support": min(args.max_support, K),
+                                "beta": float(beta),
+                                "avg_row_support": chain.avg_row_support,
+                                "s_eff": s_by_n[n],
+                                "rate": rate_by_n[n],
+                                "rep": rep,
+                                "predictor": predictor,
+                                "loss": losses[predictor],
+                            }
+                        )
+                done += 1
+                if done % max(1, total // 100) == 0:
+                    print(f"completed {done}/{total} grid trajectories")
+
+    summary = summarise_rows(raw_rows)
+    raw_path = os.path.join(args.out_dir, "grid_rate_raw_losses.csv")
+    summary_path = os.path.join(args.out_dir, "grid_rate_summary.csv")
+    write_csv(
+        raw_path,
+        raw_rows,
+        ["K", "n", "min_support", "max_support", "beta", "avg_row_support", "s_eff", "rate", "rep", "predictor", "loss"],
+    )
+    write_csv(
+        summary_path,
+        summary,
+        [
+            "K",
+            "n",
+            "min_support",
+            "max_support",
+            "beta",
+            "avg_row_support",
+            "s_eff",
+            "rate",
+            "predictor",
+            "mean_loss",
+            "se_loss",
+            "median_loss",
+            "mean_ratio_to_rate",
+            "reps",
+        ],
+    )
+    plot_path = write_grid_rate_plot(summary, args.out_dir)
+    print(f"wrote {os.path.abspath(raw_path)}")
+    print(f"wrote {os.path.abspath(summary_path)}")
+    print(f"wrote {os.path.abspath(plot_path)}")
 
 
 def plot_risk_vs_support_slice(
@@ -714,6 +958,10 @@ def main() -> None:
 
     raw_path = os.path.join(args.out_dir, "raw_losses.csv")
     summary_path = os.path.join(args.out_dir, "summary.csv")
+
+    if args.grid_rate_plot:
+        write_grid_rate_experiment(args)
+        return
 
     if args.fixed_chain_n_sweep:
         write_fixed_chain_n_sweep(args)
